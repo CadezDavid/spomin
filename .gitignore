@@ -1,0 +1,12 @@
+# Byte-compiled
+__pycache__/
+*.py[codz]
+
+# Environments
+.venv/
+.env
+.envrc
+
+# Caches
+.ruff_cache/
+.mypy_cache/
