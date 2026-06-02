@@ -4,6 +4,10 @@ Self-hosted graph memory MCP server for AI agents. Stores knowledge as a graph o
 
 "Spomin" is Slovenian for "memory".
 
+> Design note: the planned direction is to replace the current LLM-extracted
+> graph approach with embedding-only episodic memory. See
+> [MEMORY_PLAN.md](MEMORY_PLAN.md).
+
 ## Architecture
 
 ```
