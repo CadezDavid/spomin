@@ -128,28 +128,26 @@ Stores raw text and queues chunks for embedding.
 ```text
 add_memory(
   text,
-  source="conversation",
-  conversation_id?,
-  app?,
-  model?,
-  role?,
+  tier="archive",
   project?,
-  tier="archive"
+  conversation_id?
 )
 ```
 
 Use `tier="core"` for a small set of durable preferences, project facts,
 machine details, or recurring instructions.
 
+`project` groups memories that belong to the same project. `conversation_id`
+lets Spomin combine consecutive messages from one chat into rolling chunks.
+Both are optional.
+
 Example:
 
 ```text
 add_memory(
   text="I prefer Python for backend services.",
-  source="conversation",
-  conversation_id="chat-123",
-  project="spomin",
-  tier="core"
+  tier="core",
+  project="spomin"
 )
 ```
 
@@ -161,17 +159,12 @@ Returns structured JSON results from hybrid retrieval.
 search_memory(
   query,
   limit=5,
-  source?,
-  app?,
-  conversation_id?,
   project?,
-  tier?,
-  since?,
-  until?
+  tier?
 )
 ```
 
-`since` and `until` accept inclusive ISO-8601 timestamps.
+`project` and `tier` are optional exact filters.
 
 Example:
 
@@ -184,25 +177,15 @@ search_memory(
 
 ### `recent_memories`
 
-Returns recently stored raw messages, newest first. It accepts source, client
-application, conversation, project, and tier filters.
+Returns recently stored raw messages, newest first. It accepts optional
+`limit`, `project`, and `tier` arguments.
 
 ### `forget_memory`
 
-Deletes a raw message and all of its chunks when given a message id. A chunk id
-can also be deleted independently.
-
-### `memory_context`
-
-Returns the top retrieved snippets as compact text blocks suitable for direct
-inclusion in model context.
+Deletes a memory using an id returned by `search_memory` or `recent_memories`.
 
 ```text
-memory_context(
-  query="What should I remember about the Spomin project?",
-  project="spomin",
-  limit=5
-)
+forget_memory(memory_id="9f784078-c5d4-4806-a26a-8f38949aea95")
 ```
 
 ## Development
