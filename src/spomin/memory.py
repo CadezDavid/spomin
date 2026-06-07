@@ -9,7 +9,8 @@ import re
 import sqlite3
 import struct
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,20 @@ class EpisodicMemory:
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield connection
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        else:
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
+
     async def initialize(self) -> None:
         self._initialize_sync()
         self._stop_event.clear()
@@ -162,9 +177,6 @@ class EpisodicMemory:
                     embedding BLOB,
                     embedding_dimensions INTEGER,
                     embedding_revision INTEGER NOT NULL DEFAULT 0,
-                    embedding_status TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (embedding_status IN ('pending', 'processing', 'ready', 'error')),
-                    embedding_error TEXT,
                     access_count INTEGER NOT NULL DEFAULT 0,
                     last_accessed_at TEXT
                 );
@@ -186,19 +198,31 @@ class EpisodicMemory:
                 CREATE INDEX IF NOT EXISTS chunks_source_idx ON chunks(source);
                 CREATE INDEX IF NOT EXISTS chunks_project_idx ON chunks(project);
                 CREATE INDEX IF NOT EXISTS chunks_tier_idx ON chunks(tier);
-                CREATE INDEX IF NOT EXISTS chunks_embedding_status_idx
-                    ON chunks(embedding_status);
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     chunk_id UNINDEXED,
                     text,
                     tokenize = 'unicode61'
                 );
+
+                CREATE TRIGGER IF NOT EXISTS chunks_fts_insert
+                AFTER INSERT ON chunks BEGIN
+                    INSERT INTO chunks_fts (chunk_id, text)
+                    VALUES (new.id, new.text);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS chunks_fts_update
+                AFTER UPDATE OF text ON chunks BEGIN
+                    DELETE FROM chunks_fts WHERE chunk_id = old.id;
+                    INSERT INTO chunks_fts (chunk_id, text)
+                    VALUES (new.id, new.text);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS chunks_fts_delete
+                AFTER DELETE ON chunks BEGIN
+                    DELETE FROM chunks_fts WHERE chunk_id = old.id;
+                END;
                 """
-            )
-            connection.execute(
-                "UPDATE chunks SET embedding_status = 'pending' "
-                "WHERE embedding_status IN ('processing', 'error')"
             )
 
     async def close(self) -> None:
@@ -266,20 +290,108 @@ class EpisodicMemory:
         tier: str,
         created_at: str,
     ) -> list[str]:
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO messages (
+                    id, conversation_id, text, source, app, model, role,
+                    project, tier, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    conversation_id,
+                    text,
+                    source,
+                    app,
+                    model,
+                    role,
+                    project,
+                    tier,
+                    created_at,
+                ),
+            )
+            chunks = _chunk_text(
+                text,
+                target_tokens=self.settings.chunk_target_tokens,
+                max_tokens=self.settings.chunk_max_tokens,
+            )
+            chunk_ids: list[str] = []
+            if conversation_id and len(chunks) == 1:
+                existing = connection.execute(
+                    """
+                    SELECT id, text, role
+                    FROM chunks
+                    WHERE conversation_id = ?
+                      AND source = ?
+                      AND app IS ?
+                      AND model IS ?
+                      AND project IS ?
+                      AND tier = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (conversation_id, source, app, model, project, tier),
+                ).fetchone()
+                fragment = self._message_fragment(text, role)
+                if existing is not None:
+                    combined = f"{existing['text']}\n\n{fragment}"
+                    existing_tokens = len(_TOKEN_RE.findall(existing["text"]))
+                    combined_tokens = len(_TOKEN_RE.findall(combined))
+                    if (
+                        existing_tokens < self.settings.chunk_target_tokens
+                        and combined_tokens <= self.settings.chunk_max_tokens
+                    ):
+                        position = connection.execute(
+                            """
+                            SELECT COALESCE(MAX(position), -1) + 1
+                            FROM chunk_messages WHERE chunk_id = ?
+                            """,
+                            (existing["id"],),
+                        ).fetchone()[0]
+                        connection.execute(
+                            """
+                            INSERT INTO chunk_messages (
+                                chunk_id, message_id, position, text_fragment
+                            ) VALUES (?, ?, ?, ?)
+                            """,
+                            (existing["id"], message_id, position, fragment),
+                        )
+                        combined_role = (
+                            role if existing["role"] in (None, role) else None
+                        )
+                        connection.execute(
+                            """
+                            UPDATE chunks
+                            SET text = ?, role = ?, created_at = ?,
+                                embedding = NULL,
+                                embedding_dimensions = NULL,
+                                embedding_revision = embedding_revision + 1
+                            WHERE id = ?
+                            """,
+                            (combined, combined_role, created_at, existing["id"]),
+                        )
+                        return [existing["id"]]
+
+            for position, chunk_text in enumerate(chunks):
+                chunk_id = str(uuid.uuid4())
+                chunk_ids.append(chunk_id)
+                fragment = (
+                    self._message_fragment(chunk_text, role)
+                    if conversation_id
+                    else chunk_text
+                )
                 connection.execute(
                     """
-                    INSERT INTO messages (
-                        id, conversation_id, text, source, app, model, role,
-                        project, tier, created_at
+                    INSERT INTO chunks (
+                        id, conversation_id, text, source, app,
+                        model, role, project, tier, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        message_id,
+                        chunk_id,
                         conversation_id,
-                        text,
+                        fragment,
                         source,
                         app,
                         model,
@@ -289,124 +401,15 @@ class EpisodicMemory:
                         created_at,
                     ),
                 )
-                chunks = _chunk_text(
-                    text,
-                    target_tokens=self.settings.chunk_target_tokens,
-                    max_tokens=self.settings.chunk_max_tokens,
+                connection.execute(
+                    """
+                    INSERT INTO chunk_messages (
+                        chunk_id, message_id, position, text_fragment
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (chunk_id, message_id, position, fragment),
                 )
-                chunk_ids: list[str] = []
-                if conversation_id and len(chunks) == 1:
-                    existing = connection.execute(
-                        """
-                        SELECT id, text, role
-                        FROM chunks
-                        WHERE conversation_id = ?
-                          AND source = ?
-                          AND app IS ?
-                          AND model IS ?
-                          AND project IS ?
-                          AND tier = ?
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                        """,
-                        (conversation_id, source, app, model, project, tier),
-                    ).fetchone()
-                    fragment = self._message_fragment(text, role)
-                    if existing is not None:
-                        combined = f"{existing['text']}\n\n{fragment}"
-                        existing_tokens = len(_TOKEN_RE.findall(existing["text"]))
-                        combined_tokens = len(_TOKEN_RE.findall(combined))
-                        if (
-                            existing_tokens < self.settings.chunk_target_tokens
-                            and combined_tokens <= self.settings.chunk_max_tokens
-                        ):
-                            position = connection.execute(
-                                """
-                                SELECT COALESCE(MAX(position), -1) + 1
-                                FROM chunk_messages WHERE chunk_id = ?
-                                """,
-                                (existing["id"],),
-                            ).fetchone()[0]
-                            connection.execute(
-                                """
-                                INSERT INTO chunk_messages (
-                                    chunk_id, message_id, position, text_fragment
-                                ) VALUES (?, ?, ?, ?)
-                                """,
-                                (existing["id"], message_id, position, fragment),
-                            )
-                            combined_role = (
-                                role if existing["role"] in (None, role) else None
-                            )
-                            connection.execute(
-                                """
-                                UPDATE chunks
-                                SET text = ?, role = ?, created_at = ?,
-                                    embedding = NULL,
-                                    embedding_dimensions = NULL,
-                                    embedding_revision = embedding_revision + 1,
-                                    embedding_status = 'pending',
-                                    embedding_error = NULL
-                                WHERE id = ?
-                                """,
-                                (combined, combined_role, created_at, existing["id"]),
-                            )
-                            connection.execute(
-                                "DELETE FROM chunks_fts WHERE chunk_id = ?",
-                                (existing["id"],),
-                            )
-                            connection.execute(
-                                "INSERT INTO chunks_fts (chunk_id, text) VALUES (?, ?)",
-                                (existing["id"], combined),
-                            )
-                            connection.execute("COMMIT")
-                            return [existing["id"]]
-
-                for position, chunk_text in enumerate(chunks):
-                    chunk_id = str(uuid.uuid4())
-                    chunk_ids.append(chunk_id)
-                    fragment = (
-                        self._message_fragment(chunk_text, role)
-                        if conversation_id
-                        else chunk_text
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO chunks (
-                            id, conversation_id, text, source, app,
-                            model, role, project, tier, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            chunk_id,
-                            conversation_id,
-                            fragment,
-                            source,
-                            app,
-                            model,
-                            role,
-                            project,
-                            tier,
-                            created_at,
-                        ),
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO chunk_messages (
-                            chunk_id, message_id, position, text_fragment
-                        ) VALUES (?, ?, ?, ?)
-                        """,
-                        (chunk_id, message_id, position, fragment),
-                    )
-                    connection.execute(
-                        "INSERT INTO chunks_fts (chunk_id, text) VALUES (?, ?)",
-                        (chunk_id, fragment),
-                    )
-                connection.execute("COMMIT")
-                return chunk_ids
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+            return chunk_ids
 
     @staticmethod
     def _message_fragment(text: str, role: str | None) -> str:
@@ -527,8 +530,7 @@ class EpisodicMemory:
                 f"""
                 SELECT c.*
                 FROM chunks c
-                WHERE c.embedding_status = 'ready'
-                  AND c.embedding IS NOT NULL {where}
+                WHERE c.embedding IS NOT NULL {where}
                 """,
                 values,
             ).fetchall()
@@ -664,87 +666,58 @@ class EpisodicMemory:
         return self._forget_sync(memory_id)
 
     def _forget_sync(self, memory_id: str) -> bool:
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                message = connection.execute(
-                    "SELECT id FROM messages WHERE id = ?", (memory_id,)
-                ).fetchone()
-                if message is not None:
-                    chunk_rows = connection.execute(
-                        """
-                        SELECT DISTINCT chunk_id AS id
-                        FROM chunk_messages WHERE message_id = ?
-                        """,
-                        (memory_id,),
-                    ).fetchall()
-                    chunk_ids = [row["id"] for row in chunk_rows]
-                    connection.execute("DELETE FROM messages WHERE id = ?", (memory_id,))
-                    for chunk_id in chunk_ids:
-                        fragments = connection.execute(
+        with self._transaction() as connection:
+            chunk_ids = [
+                row["chunk_id"]
+                for row in connection.execute(
+                    "SELECT DISTINCT chunk_id FROM chunk_messages WHERE message_id = ?",
+                    (memory_id,),
+                )
+            ]
+            deleted = connection.execute(
+                "DELETE FROM messages WHERE id = ?", (memory_id,)
+            ).rowcount
+            if deleted:
+                for chunk_id in chunk_ids:
+                    fragments = [
+                        row["text_fragment"]
+                        for row in connection.execute(
                             """
                             SELECT text_fragment FROM chunk_messages
                             WHERE chunk_id = ? ORDER BY position
                             """,
                             (chunk_id,),
-                        ).fetchall()
-                        self._delete_fts_rows(connection, [chunk_id])
-                        if not fragments:
-                            connection.execute(
-                                "DELETE FROM chunks WHERE id = ?", (chunk_id,)
-                            )
-                            continue
-                        rebuilt = "\n\n".join(
-                            fragment["text_fragment"] for fragment in fragments
                         )
+                    ]
+                    if fragments:
                         connection.execute(
                             """
                             UPDATE chunks
                             SET text = ?, embedding = NULL,
                                 embedding_dimensions = NULL,
-                                embedding_revision = embedding_revision + 1,
-                                embedding_status = 'pending',
-                                embedding_error = NULL
+                                embedding_revision = embedding_revision + 1
                             WHERE id = ?
                             """,
-                            (rebuilt, chunk_id),
+                            ("\n\n".join(fragments), chunk_id),
                         )
+                    else:
                         connection.execute(
-                            "INSERT INTO chunks_fts (chunk_id, text) VALUES (?, ?)",
-                            (chunk_id, rebuilt),
+                            "DELETE FROM chunks WHERE id = ?", (chunk_id,)
                         )
-                    connection.execute("COMMIT")
-                    self._work_event.set()
-                    return True
+                self._work_event.set()
+                return True
 
-                chunk = connection.execute(
-                    "SELECT id FROM chunks WHERE id = ?", (memory_id,)
-                ).fetchone()
-                if chunk is not None:
-                    self._delete_fts_rows(connection, [memory_id])
-                    connection.execute("DELETE FROM chunks WHERE id = ?", (memory_id,))
-                    connection.execute("COMMIT")
-                    return True
-                connection.execute("ROLLBACK")
-                return False
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-
-    @staticmethod
-    def _delete_fts_rows(
-        connection: sqlite3.Connection, chunk_ids: Iterable[str]
-    ) -> None:
-        connection.executemany(
-            "DELETE FROM chunks_fts WHERE chunk_id = ?",
-            ((chunk_id,) for chunk_id in chunk_ids),
-        )
+            return bool(
+                connection.execute(
+                    "DELETE FROM chunks WHERE id = ?", (memory_id,)
+                ).rowcount
+            )
 
     async def _embedding_worker(self) -> None:
         while not self._stop_event.is_set():
-            pending = self._claim_pending_sync(self.settings.embedding_batch_size)
+            self._work_event.clear()
+            pending = self._pending_embeddings(self.settings.embedding_batch_size)
             if not pending:
-                self._work_event.clear()
                 try:
                     await asyncio.wait_for(
                         self._work_event.wait(),
@@ -765,52 +738,31 @@ class EpisodicMemory:
                 ]
                 if len(embeddings) != len(pending):
                     raise RuntimeError("Embedding server returned an unexpected batch size.")
-                self._complete_embeddings_sync(pending, embeddings)
-            except asyncio.CancelledError:
-                self._reset_embedding_status_sync(pending)
-                raise
+                self._store_embeddings(pending, embeddings)
             except Exception as exc:
                 logger.warning("Embedding batch failed: %s", exc)
-                self._fail_embeddings_sync(pending, str(exc))
                 try:
                     await asyncio.wait_for(
                         self._stop_event.wait(),
                         timeout=self.settings.embedding_retry_interval,
                     )
                 except TimeoutError:
-                    self._reset_embedding_status_sync(pending)
+                    pass
 
-    def _claim_pending_sync(self, limit: int) -> list[dict[str, Any]]:
+    def _pending_embeddings(self, limit: int) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                rows = connection.execute(
-                    """
-                    SELECT id, text, embedding_revision FROM chunks
-                    WHERE embedding_status = 'pending'
-                    ORDER BY created_at
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
-                ids = [row["id"] for row in rows]
-                if ids:
-                    placeholders = ",".join("?" for _ in ids)
-                    connection.execute(
-                        f"""
-                        UPDATE chunks SET embedding_status = 'processing',
-                            embedding_error = NULL
-                        WHERE id IN ({placeholders})
-                        """,
-                        ids,
-                    )
-                connection.execute("COMMIT")
-                return [dict(row) for row in rows]
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+            rows = connection.execute(
+                """
+                SELECT id, text, embedding_revision FROM chunks
+                WHERE embedding IS NULL
+                ORDER BY created_at
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
-    def _complete_embeddings_sync(
+    def _store_embeddings(
         self,
         rows: list[dict[str, Any]],
         embeddings: list[Sequence[float]],
@@ -819,10 +771,8 @@ class EpisodicMemory:
             connection.executemany(
                 """
                 UPDATE chunks
-                SET embedding = ?, embedding_dimensions = ?,
-                    embedding_status = 'ready', embedding_error = NULL
+                SET embedding = ?, embedding_dimensions = ?
                 WHERE id = ? AND embedding_revision = ?
-                  AND embedding_status = 'processing'
                 """,
                 [
                     (
@@ -833,31 +783,4 @@ class EpisodicMemory:
                     )
                     for row, embedding in zip(rows, embeddings, strict=True)
                 ],
-            )
-
-    def _fail_embeddings_sync(
-        self, rows: list[dict[str, Any]], error: str
-    ) -> None:
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                UPDATE chunks SET embedding_status = 'error', embedding_error = ?
-                WHERE id = ? AND embedding_revision = ?
-                  AND embedding_status = 'processing'
-                """,
-                [
-                    (error[:1000], row["id"], row["embedding_revision"])
-                    for row in rows
-                ],
-            )
-
-    def _reset_embedding_status_sync(self, rows: list[dict[str, Any]]) -> None:
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                UPDATE chunks SET embedding_status = 'pending'
-                WHERE id = ? AND embedding_revision = ?
-                  AND embedding_status IN ('processing', 'error')
-                """,
-                [(row["id"], row["embedding_revision"]) for row in rows],
             )
