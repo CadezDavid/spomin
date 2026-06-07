@@ -2,7 +2,7 @@
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -21,7 +21,7 @@ memory = EpisodicMemory(settings)
 
 
 @asynccontextmanager
-async def lifespan(server: FastMCP) -> AsyncIterator[None]:
+async def lifespan(_server: FastMCP) -> AsyncGenerator[None]:
     """Initialize the local archive and embedding worker."""
     logger.info("Opening memory archive at %s", settings.database_path)
     try:

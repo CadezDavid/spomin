@@ -250,7 +250,6 @@ class EpisodicMemory:
             "chunk_ids": chunk_ids,
             "chunk_count": len(chunk_ids),
             "tier": tier,
-            "embedding_status": "pending",
             "created_at": created_at,
         }
 
