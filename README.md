@@ -164,7 +164,10 @@ search_memory(
 )
 ```
 
-`project` and `tier` are optional exact filters.
+When `project` is set, retrieval includes memories from that project plus
+global core memories whose project is unset. This keeps durable personal
+preferences available across projects without mixing in other projects or
+unscoped archive history. An explicit `tier` narrows that combined scope.
 
 Example:
 
@@ -178,7 +181,8 @@ search_memory(
 ### `recent_memories`
 
 Returns recently stored raw messages, newest first. It accepts optional
-`limit`, `project`, and `tier` arguments.
+`limit`, `project`, and `tier` arguments. Project scoping follows the same rule
+as `search_memory`: the selected project plus global core memories.
 
 ### `forget_memory`
 

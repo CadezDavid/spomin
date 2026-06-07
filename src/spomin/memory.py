@@ -482,10 +482,16 @@ class EpisodicMemory:
     ) -> tuple[str, list[str]]:
         clauses: list[str] = []
         values: list[str] = []
-        for key in ("source", "app", "conversation_id", "project", "tier"):
+        for key in ("source", "app", "conversation_id", "tier"):
             if filters[key] is not None:
                 clauses.append(f"{alias}.{key} = ?")
                 values.append(str(filters[key]))
+        if filters["project"] is not None:
+            clauses.append(
+                f"({alias}.project = ? OR "
+                f"({alias}.project IS NULL AND {alias}.tier = 'core'))"
+            )
+            values.append(str(filters["project"]))
         if filters["since"] is not None:
             clauses.append(f"{alias}.created_at >= ?")
             values.append(str(filters["since"]))

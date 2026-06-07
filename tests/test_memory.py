@@ -209,3 +209,56 @@ def test_previous_embedding_queue_schema_remains_compatible(tmp_path: Path) -> N
             await memory.close()
 
     asyncio.run(scenario())
+
+
+def test_project_scope_includes_global_core_only(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database_path = tmp_path / "spomin.db"
+        memory = make_memory(database_path)
+        await memory.initialize()
+        try:
+            project_memory = await memory.add_memory(
+                "Python convention for alpha",
+                project="alpha",
+            )
+            global_core = await memory.add_memory(
+                "Global Python preference",
+                tier="core",
+            )
+            global_archive = await memory.add_memory(
+                "Old global Python discussion",
+            )
+            other_project = await memory.add_memory(
+                "Python convention for beta",
+                project="beta",
+            )
+            await wait_until_embedded(database_path, expected=4)
+
+            results = await memory.search(
+                "Python convention preference",
+                limit=10,
+                project="alpha",
+            )
+            result_ids = {result["message_id"] for result in results}
+            assert project_memory["id"] in result_ids
+            assert global_core["id"] in result_ids
+            assert global_archive["id"] not in result_ids
+            assert other_project["id"] not in result_ids
+
+            archive_results = await memory.search(
+                "Python",
+                limit=10,
+                project="alpha",
+                tier="archive",
+            )
+            assert [result["message_id"] for result in archive_results] == [
+                project_memory["id"]
+            ]
+
+            recent = await memory.recent(limit=10, project="alpha")
+            recent_ids = {result["id"] for result in recent}
+            assert recent_ids == {project_memory["id"], global_core["id"]}
+        finally:
+            await memory.close()
+
+    asyncio.run(scenario())
