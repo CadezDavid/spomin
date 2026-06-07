@@ -15,6 +15,7 @@ RUN uv pip install --system .
 
 # Create a non-root user
 RUN groupadd -r spomin && useradd -r -g spomin spomin
+RUN mkdir -p /app/data
 RUN chown -R spomin:spomin /app
 
 # Switch to non-root user

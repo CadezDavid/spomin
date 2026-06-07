@@ -10,3 +10,15 @@ __pycache__/
 # Caches
 .ruff_cache/
 .mypy_cache/
+.pytest_cache/
+
+# Local memory archive
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Packaging
+*.egg-info/
+build/
+dist/

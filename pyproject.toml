@@ -1,13 +1,17 @@
 [project]
 name = "spomin"
-version = "0.1.0"
-description = "Self-hosted graph memory MCP server for AI agents"
+version = "0.2.0"
+description = "Self-hosted episodic memory MCP server for AI agents"
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.0",
-    "graphiti-core>=0.3",
     "openai>=1.0",
     "pydantic-settings>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
 ]
 
 [project.scripts]

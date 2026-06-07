@@ -1,99 +1,229 @@
 # Spomin
 
-Self-hosted graph memory MCP server for AI agents. Stores knowledge as a graph of entities and relationships, exposed over Streamable HTTP.
+Self-hosted episodic memory MCP server for AI agents. Spomin stores raw text in
+SQLite, indexes it with FTS5, embeds chunks through an OpenAI-compatible
+endpoint, and retrieves memories with hybrid keyword and vector ranking.
 
 "Spomin" is Slovenian for "memory".
 
-> Design note: the planned direction is to replace the current LLM-extracted
-> graph approach with embedding-only episodic memory. See
-> [MEMORY_PLAN.md](MEMORY_PLAN.md).
-
 ## Architecture
 
-```
-opencode / llama.cpp webui
-           │  Streamable HTTP (port 8084)
-           ▼
-     spomin server  (FastMCP)
-           │
-           ▼
-         Neo4j        embedding server
+```text
+opencode / llama.cpp web UI
+           |
+           | Streamable HTTP (port 8084)
+           v
+     Spomin FastMCP server
+       |             |
+       v             v
+ SQLite + FTS5   embedding server
 ```
 
-- **Entity extraction** — LLM via OpenAI-compatible API
-- **Semantic search** — embedding server via OpenAI-compatible API
-- **Storage** — Neo4j, managed by graphiti-core
+- Raw messages are the append-only source of truth.
+- Paragraph-aware chunks target 500 tokens and cap at 800 by default.
+- Writes commit before embedding and are searchable through FTS immediately.
+- A persistent background queue embeds pending chunks in batches.
+- Retrieval combines vector and BM25 ranks with recency, access, and core-memory
+  boosts.
+- No extraction LLM, graph database, or reranker is required.
 
 ## Quick Start
 
+Spomin requires an OpenAI-compatible embedding server. For example, start
+`llama-server` with an embedding model on port `8081`, then:
+
 ```bash
-# 1. Copy and edit config
 cp .env.example .env
-
-# 2. Start Neo4j and spomin
-docker compose up -d
-
-# 3. Connect your AI client to http://localhost:8084
+docker compose up -d --build
+docker compose logs -f spomin
 ```
+
+The Streamable HTTP MCP endpoint is `http://localhost:8084/`.
+
+An OpenAI-compatible embedding endpoint must be reachable at
+`EMBEDDER_BASE_URL`. With Docker, `host.docker.internal` resolves to the host.
+Keyword search remains available while the embedding endpoint is offline, and
+failed embedding jobs are retried.
+
+Stop the server without deleting stored memories:
+
+```bash
+docker compose down
+```
+
+## Run Locally
+
+Create an environment and install Spomin:
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+cp .env.example .env
+```
+
+Change these values in `.env`:
+
+```env
+DATABASE_PATH=./data/spomin.db
+EMBEDDER_BASE_URL=http://localhost:8081/v1
+```
+
+Start the server:
+
+```bash
+.venv/bin/spomin
+```
+
+## Connect a Client
+
+Configure Spomin as a remote Streamable HTTP MCP server. A typical client
+configuration looks like:
+
+```json
+{
+  "mcpServers": {
+    "spomin": {
+      "type": "streamable-http",
+      "url": "http://localhost:8084/"
+    }
+  }
+}
+```
+
+Client field names vary. Use the endpoint URL above when a client asks for a
+remote MCP or Streamable HTTP server.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust:
-
 ```env
-# Neo4j connection
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=password
+DATABASE_PATH=/app/data/spomin.db
 
-# LLM for entity extraction (any OpenAI-compatible endpoint)
-EXTRACTION_LLM_BASE_URL=http://host.docker.internal:8082/v1
-EXTRACTION_LLM_MODEL=Qwen3-0.5B-Q4_K_M.gguf
-EXTRACTION_LLM_API_KEY=dummy
-
-# Embedding model for semantic search
 EMBEDDER_BASE_URL=http://host.docker.internal:8081/v1
 EMBEDDER_MODEL=embeddinggemma-300M-Q8_0.gguf
 EMBEDDER_API_KEY=dummy
 
-# Server
+CHUNK_TARGET_TOKENS=500
+CHUNK_MAX_TOKENS=800
+EMBEDDING_BATCH_SIZE=16
+EMBEDDING_POLL_INTERVAL=2
+EMBEDDING_RETRY_INTERVAL=15
+
 HOST=0.0.0.0
 PORT=8084
-USER_ID=default
 ```
+
+For local execution outside Docker, set `DATABASE_PATH=./data/spomin.db` and
+point `EMBEDDER_BASE_URL` at a host-reachable URL.
+
+Additional retrieval weights such as `VECTOR_WEIGHT`, `KEYWORD_WEIGHT`,
+`RECENCY_WEIGHT`, and `CORE_MEMORY_BOOST` can be set through environment
+variables. Defaults are defined in `src/spomin/config.py`.
 
 ## MCP Tools
 
 ### `add_memory`
 
-Extract entities and relationships from natural language text.
+Stores raw text and queues chunks for embedding.
 
+```text
+add_memory(
+  text,
+  source="conversation",
+  conversation_id?,
+  app?,
+  model?,
+  role?,
+  project?,
+  tier="archive"
+)
 ```
-add_memory(text, source?) → "Memory stored (uuid=…). Extracted N entities, M relationships."
+
+Use `tier="core"` for a small set of durable preferences, project facts,
+machine details, or recurring instructions.
+
+Example:
+
+```text
+add_memory(
+  text="I prefer Python for backend services.",
+  source="conversation",
+  conversation_id="chat-123",
+  project="spomin",
+  tier="core"
+)
 ```
 
 ### `search_memory`
 
-Search memories semantically by query.
+Returns structured JSON results from hybrid retrieval.
 
+```text
+search_memory(
+  query,
+  limit=5,
+  source?,
+  app?,
+  conversation_id?,
+  project?,
+  tier?,
+  since?,
+  until?
+)
 ```
-search_memory(query, limit?) → "Entity --[relation]--> Entity: fact"
+
+`since` and `until` accept inclusive ISO-8601 timestamps.
+
+Example:
+
+```text
+search_memory(
+  query="Which language do I prefer for backend work?",
+  limit=5
+)
 ```
 
-## Requirements
+### `recent_memories`
 
-- Docker / Docker Compose
-- External LLM server (OpenAI-compatible, e.g. llama-server)
-- External embedding server (OpenAI-compatible, e.g. llama-server)
+Returns recently stored raw messages, newest first. It accepts source, client
+application, conversation, project, and tier filters.
 
-## Dependencies
+### `forget_memory`
 
-- `mcp[cli]>=1.0` — MCP SDK
-- `graphiti-core>=0.3` — Knowledge graph engine
-- `openai>=1.0` — LLM/embedding client
-- `pydantic-settings>=2.0` — Config management
+Deletes a raw message and all of its chunks when given a message id. A chunk id
+can also be deleted independently.
 
-## Notes
+### `memory_context`
 
-- Inspect the graph via Neo4j Browser at `http://localhost:7474`
-- `host.docker.internal` maps to the host machine for reaching external services
+Returns the top retrieved snippets as compact text blocks suitable for direct
+inclusion in model context.
+
+```text
+memory_context(
+  query="What should I remember about the Spomin project?",
+  project="spomin",
+  limit=5
+)
+```
+
+## Development
+
+```bash
+.venv/bin/pytest
+python -m compileall -q src tests
+docker compose config --quiet
+```
+
+SQLite must include FTS5 support. Current official Python and Docker images do.
+
+## Storage
+
+The `spomin_data` Docker volume contains the SQLite database. Embeddings are
+stored as float32 blobs alongside their dimensions. Raw messages are never
+replaced by summaries; later compaction or summarization can be added as
+separate retrieval aids.
+
+Deleting the Docker volume permanently removes the archive:
+
+```bash
+docker compose down --volumes
+```
