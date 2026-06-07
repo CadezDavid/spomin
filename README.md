@@ -227,3 +227,12 @@ Deleting the Docker volume permanently removes the archive:
 ```bash
 docker compose down --volumes
 ```
+
+Vector search currently scans stored embeddings in-process. This keeps the
+implementation simple and is appropriate for a personal archive. A vector
+index such as sqlite-vec can be added if archive size makes scan latency
+measurable.
+
+Potential future additions include optional background summaries, core-memory
+promotion workflows, and archive export/import commands. Summaries should
+remain retrieval aids and never replace the raw message archive.
