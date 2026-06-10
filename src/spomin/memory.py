@@ -577,14 +577,8 @@ class EpisodicMemory:
         return [
             {
                 "id": chunk_id,
-                "message_id": message_ids[chunk_id][0],
-                "message_ids": message_ids[chunk_id],
                 "text": combined[chunk_id]["text"],
                 "source": combined[chunk_id]["source"],
-                "conversation_id": combined[chunk_id]["conversation_id"],
-                "app": combined[chunk_id]["app"],
-                "model": combined[chunk_id]["model"],
-                "role": combined[chunk_id]["role"],
                 "project": combined[chunk_id]["project"],
                 "tier": combined[chunk_id]["tier"],
                 "created_at": combined[chunk_id]["created_at"],
@@ -657,8 +651,7 @@ class EpisodicMemory:
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT m.id, m.conversation_id, m.text, m.source, m.app,
-                       m.model, m.role, m.project, m.tier, m.created_at
+                SELECT m.id, m.text, m.source, m.project, m.tier, m.created_at
                 FROM messages m
                 {where}
                 ORDER BY m.created_at DESC

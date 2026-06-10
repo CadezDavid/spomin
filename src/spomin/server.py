@@ -45,7 +45,8 @@ async def add_memory(
     project: str | None = None,
     conversation_id: str | None = None,
 ) -> str:
-    """Store raw memory text and queue its chunks for embedding.
+    """Store important facts, user preferences, or key takeaways to memory for long-term recall.
+    Use this proactively whenever the user shares something significant or you derive a useful insight that should be remembered across sessions.
 
     Args:
         text: Natural language description of what to remember.
@@ -70,7 +71,8 @@ async def search_memory(
     project: str | None = None,
     tier: str | None = None,
 ) -> str:
-    """Search memories using hybrid vector, keyword, and recency ranking.
+    """Retrieve relevant information from long-term memory.
+    Call this whenever the user mentions past events, preferences, or topics that are likely stored in memory, or when you need context from previous conversations.
 
     Args:
         query: What to search for.
@@ -95,7 +97,8 @@ async def recent_memories(
     project: str | None = None,
     tier: str | None = None,
 ) -> str:
-    """Return recently stored raw memories, newest first.
+    """List the most recently stored memories.
+    Useful for reviewing the last few things learned or ensuring recent updates were saved correctly.
 
     Args:
         limit: Maximum number of memories to return.
@@ -114,11 +117,39 @@ async def recent_memories(
 
 @mcp.tool()
 async def forget_memory(memory_id: str) -> str:
-    """Delete a memory by the id returned from search or recent results."""
+    """Remove a specific memory from storage.
+    Use this when the user explicitly asks to forget something or when information is corrected/outdated.
+    """
     deleted = await memory.forget(memory_id)
     if deleted:
         return f"Memory {memory_id} forgotten."
     return f"Memory {memory_id} not found."
+
+
+@mcp.prompt()
+def memory_usage() -> str:
+    """Instructions for the AI on how to manage long-term memory effectively."""
+    return (
+        "You are equipped with a long-term memory system (spomin). To provide a personalized "
+        "and consistent experience, you should manage this memory proactively:\n\n"
+        "1. **Saving Memories (`add_memory`)**:\n"
+        "   - Whenever the user shares a preference, a personal detail, a goal, or a specific "
+        "way they like things done, save it.\n"
+        "   - After completing a complex task or reaching a milestone, save a summary of the "
+        "outcome and key learnings.\n"
+        "   - If you discover a fact about the user or the project that isn't common knowledge, store it.\n"
+        "   - Use 'core' tier for fundamental truths (e.g., 'The user prefers Python over JS') "
+        "and 'archive' for episodic details.\n\n"
+        "2. **Recalling Memories (`search_memory`, `recent_memories`)**:\n"
+        "   - At the start of a new topic or session, search for relevant context.\n"
+        "   - When the user says 'remember when...', 'as I mentioned before...', or 'my usual...', "
+        "search memory immediately.\n"
+        "   - If you are unsure about a preference, check memory before asking the user.\n\n"
+        "3. **Maintaining Memories (`forget_memory`)**:\n"
+        "   - If the user corrects a previous statement, update the memory by searching for the "
+        "old one and forgetting it, then adding the new one.\n\n"
+        "Your goal is to make the user feel known and understood without them having to repeat themselves."
+    )
 
 
 def main() -> None:

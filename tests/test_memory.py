@@ -108,14 +108,14 @@ def test_store_search_recent_filter_and_forget(tmp_path: Path) -> None:
             await wait_until_embedded(database_path, expected=2)
 
             results = await memory.search("Python database", limit=2)
-            assert results[0]["message_id"] == first["id"]
-            assert results[0]["message_ids"] == [first["id"], third["id"]]
+            assert results[0]["id"] == first["chunk_ids"][0]
+            assert "Python" in results[0]["text"] and "container" in results[0]["text"]
             assert results[0]["project"] == "spomin"
 
             filtered = await memory.search(
                 "Friday", limit=5, project="home", tier="core"
             )
-            assert [item["message_id"] for item in filtered] == [second["id"]]
+            assert [item["id"] for item in filtered] == second["chunk_ids"]
 
             recent = await memory.recent(limit=5, conversation_id="chat-1")
             assert [item["id"] for item in recent] == [third["id"], first["id"]]
@@ -123,7 +123,7 @@ def test_store_search_recent_filter_and_forget(tmp_path: Path) -> None:
             assert await memory.forget(first["id"]) is True
             assert await memory.forget(first["id"]) is False
             remaining = await memory.search("container", limit=5, project="spomin")
-            assert remaining[0]["message_ids"] == [third["id"]]
+            assert remaining[0]["id"] == third["chunk_ids"][0]
             assert "Python" not in remaining[0]["text"]
             assert await memory.forget(third["id"]) is True
             assert (
@@ -148,7 +148,7 @@ def test_raw_write_is_searchable_before_embedding(tmp_path: Path) -> None:
         try:
             stored = await memory.add_memory("Unique keyword heliotrope", source="note")
             results = await memory.search("heliotrope", limit=1)
-            assert results[0]["message_id"] == stored["id"]
+            assert results[0]["id"] == stored["chunk_ids"][0]
         finally:
             await memory.close()
 
@@ -239,11 +239,11 @@ def test_project_scope_includes_global_core_only(tmp_path: Path) -> None:
                 limit=10,
                 project="alpha",
             )
-            result_ids = {result["message_id"] for result in results}
-            assert project_memory["id"] in result_ids
-            assert global_core["id"] in result_ids
-            assert global_archive["id"] not in result_ids
-            assert other_project["id"] not in result_ids
+            result_ids = {result["id"] for result in results}
+            assert project_memory["chunk_ids"][0] in result_ids
+            assert global_core["chunk_ids"][0] in result_ids
+            assert global_archive["chunk_ids"][0] not in result_ids
+            assert other_project["chunk_ids"][0] not in result_ids
 
             archive_results = await memory.search(
                 "Python",
@@ -251,8 +251,8 @@ def test_project_scope_includes_global_core_only(tmp_path: Path) -> None:
                 project="alpha",
                 tier="archive",
             )
-            assert [result["message_id"] for result in archive_results] == [
-                project_memory["id"]
+            assert [result["id"] for result in archive_results] == [
+                project_memory["chunk_ids"][0]
             ]
 
             recent = await memory.recent(limit=10, project="alpha")
